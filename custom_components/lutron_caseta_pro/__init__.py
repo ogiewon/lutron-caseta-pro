@@ -15,6 +15,8 @@ import os.path
 import weakref
 
 import voluptuous as vol
+from homeassistant.core import HomeAssistant
+from homeassistant.components import configurator
 from homeassistant.components.light import VALID_TRANSITION
 from homeassistant.const import CONF_DEVICES, CONF_HOST, CONF_ID, CONF_MAC, CONF_TYPE
 from homeassistant.helpers import discovery
@@ -72,12 +74,11 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 
-async def request_configuration(hass, config, host, bridge):
+async def request_configuration(hass: HomeAssistant, config, host, bridge):
     """Request configuration from the user to configure a host."""
-    configurator = hass.components.configurator
-
     if host in _CONFIGURING:
         configurator.notify_errors(
+            hass,
             _CONFIGURING[host],
             "Failed to process Lutron Integration Report, please try again.",
         )
@@ -90,20 +91,25 @@ async def request_configuration(hass, config, host, bridge):
         integration_report_data = data.get("integration_report")
         if not integration_report_data:
             configurator.notify_errors(
-                request_id, "Error reading the Integration Report. Please try again."
+                hass, request_id, "Error reading the Integration Report. Please try again."
             )
             return False
 
         # parse JSON integration report
-        json_int_report = json.loads(integration_report_data)
+        json_int_report = None
+        try:
+            json_int_report = json.loads(integration_report_data)
+        except json.decoder.JSONDecodeError as ex:
+            _LOGGER.error("Error parsing the Integration Report: %s", ex)
 
         # check for top-level object
-        if not json_int_report["LIPIdList"]:
+        if not json_int_report or "LIPIdList" not in json_int_report:
             configurator.notify_errors(
+                hass,
                 request_id,
                 "Error parsing Integration Report. "
-                "Expecting it to start "
-                "with 'LIPIdList'.",
+                "Expecting it in the format "
+                '{ "LIPIdList": ...}',
             )
             return False
 
@@ -115,15 +121,16 @@ async def request_configuration(hass, config, host, bridge):
 
         # run setup
         _LOGGER.debug("Running setup for host %s", host)
-        hass.async_add_job(async_setup_bridge, hass, config, fname, bridge)
+        hass.create_task(async_setup_bridge(hass, config, fname, bridge))
         _LOGGER.debug("Releasing configurator.")
-        configurator.request_done(request_id)
+        configurator.request_done(hass, request_id)
 
         return True
 
     _LOGGER.info("Requesting config from user for host %s", host)
 
     request_id = configurator.async_request_config(
+        hass=hass,
         name="Lutron Caseta Smart Bridge PRO / Ra2 Select",
         callback=setup_callback,
         description="Enter the contents of the Integration Report:",
@@ -135,12 +142,12 @@ async def request_configuration(hass, config, host, bridge):
     _CONFIGURING[host] = request_id
 
 
-def get_config_file(hass, host):
+def get_config_file(hass: HomeAssistant, host):
     """Return expected path to the integration report."""
     return hass.config.path(DOMAIN + "_" + host + ".json")
 
 
-async def async_setup(hass, config):
+async def async_setup(hass: HomeAssistant, config):
     """Initialize the component and loads the integration report."""
     if CONF_BRIDGES in config[DOMAIN]:
         for bridge in config[DOMAIN][CONF_BRIDGES]:
@@ -155,7 +162,7 @@ async def async_setup(hass, config):
                     host,
                     fname,
                 )
-                hass.async_add_job(request_configuration, hass, config, host, bridge)
+                hass.async_create_task(request_configuration(hass, config, host, bridge))
             else:
                 _LOGGER.debug("Loading Integration Report %s", fname)
                 await async_setup_bridge(hass, config, fname, bridge)
@@ -163,7 +170,7 @@ async def async_setup(hass, config):
     return True
 
 
-async def async_setup_bridge(hass, config, fname, bridge):
+async def async_setup_bridge(hass: HomeAssistant, config, fname, bridge):
     """Initialize a bridge by loading its integration report."""
     _LOGGER.debug("Setting up bridge using Integration Report %s", fname)
 
